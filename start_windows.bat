@@ -18,12 +18,12 @@ if not exist ".venv" (
     python -m venv .venv
 )
 
-echo [2/3] Installing / verifying dependencies...
-call .venv\Scripts\activate.bat
-pip install --upgrade pip -q
-pip install -r requirements.txt -q
+echo [2/3] Installing / verifying dependencies (this takes ~30s on first run)...
+.venv\Scripts\python.exe -m pip install --upgrade pip -q
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 
-echo [3/3] Launching Dashboard at http://localhost:8090 ...
-start http://localhost:8090
-python -m uvicorn app:app --host 127.0.0.1 --port 8090
+echo [3/3] Launching Dashboard at http://127.0.0.1:8090 ...
+echo (If you have thousands of photos, watch the scan progress below!)
+start http://127.0.0.1:8090
+.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8090
 pause

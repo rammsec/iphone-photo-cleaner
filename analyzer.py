@@ -717,10 +717,15 @@ def scan_Backup_directory(source_dir: str) -> dict:
                 if str(vp) not in paired_mov_paths:
                     video_tasks.append(vp)
 
+    total_to_scan = len(photo_tasks) + len(video_tasks)
+    print(f"\n[SCAN] Found {len(photo_tasks)} photos (incl. {len(paired_mov_paths)} Live Photo pairs) and {len(video_tasks)} videos in {root_path}", flush=True)
+
     media_items: List[MediaItem] = []
     idx_counter = 1
 
-    for photo_path, live_mov in sorted(photo_tasks, key=lambda x: str(x[0])):
+    for i, (photo_path, live_mov) in enumerate(sorted(photo_tasks, key=lambda x: str(x[0])), 1):
+        if i == 1 or i % 25 == 0 or i == len(photo_tasks):
+            print(f"  -> Analyzing photos: {i}/{len(photo_tasks)} ({photo_path.name})...", flush=True)
         rel_p = str(photo_path.relative_to(root_path))
         file_id = f"media_{idx_counter:05d}"
         idx_counter += 1
@@ -733,7 +738,9 @@ def scan_Backup_directory(source_dir: str) -> dict:
         if item:
             media_items.append(item)
 
-    for video_path in sorted(video_tasks):
+    for j, video_path in enumerate(sorted(video_tasks), 1):
+        if j == 1 or j % 10 == 0 or j == len(video_tasks):
+            print(f"  -> Analyzing videos: {j}/{len(video_tasks)} ({video_path.name})...", flush=True)
         rel_p = str(video_path.relative_to(root_path))
         file_id = f"media_{idx_counter:05d}"
         idx_counter += 1
@@ -744,7 +751,9 @@ def scan_Backup_directory(source_dir: str) -> dict:
         )
         media_items.append(v_item)
 
+    print(f"[SCAN] Clustering {len(media_items)} items for visual similarity & bursts...", flush=True)
     clusters = cluster_similar_media(media_items)
+    print(f"[SCAN] Complete! Found {len(clusters)} similarity clusters.\n", flush=True)
 
     # Calculate summary statistics
     total_size = sum(it.file_size for it in media_items)
