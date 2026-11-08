@@ -1,7 +1,7 @@
 """
 FastAPI Backend for iPhone 16 Pro Max / 18 Pro Max Photo & Video Cleaner (Mode B: Full Backup + Smart Prune).
-Starts listening on port 8090 immediately and runs the initial folder scan in a background thread
-so the browser never gets "Unable to reach site" while thousands of photos are being analyzed.
+Starts listening on port 8090 immediately and runs the initial folder scan in a background thread.
+Supports instant re-clustering when the user changes the Similarity % Threshold (default 95%) or Time Window!
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ try:
 except ImportError:
     pass
 
-from analyzer import scan_Backup_directory
+from analyzer import build_scan_response, scan_Backup_directory
 from demo_generator import create_demo_workspace
 from usb_archiver import execute_archive_plan
 
@@ -47,8 +47,11 @@ app = FastAPI(title="iPhone 16/18 Pro Max Photo & Video Cleaner (Windows 11 Edit
 SCAN_STATE: Dict = {
     "source_dir": str(DEFAULT_SOURCE_DIR),
     "archive_dir": str(DEFAULT_ARCHIVE_DIR),
+    "min_similarity_pct": 95.0,
+    "max_time_window_sec": 120.0,
     "scanning": False,
     "scan_error": None,
+    "raw_items": [],
     "scan_result": None,
 }
 
@@ -56,6 +59,13 @@ SCAN_STATE: Dict = {
 class ScanRequest(BaseModel):
     source_dir: str
     archive_dir: Optional[str] = None
+    min_similarity_pct: float = 95.0
+    max_time_window_sec: float = 120.0
+
+
+class ReclusterRequest(BaseModel):
+    min_similarity_pct: float = 95.0
+    max_time_window_sec: float = 120.0
 
 
 class ArchiveRequest(BaseModel):
@@ -65,14 +75,20 @@ class ArchiveRequest(BaseModel):
     prune_connected_iphone: bool = False
 
 
-def _run_background_scan(source_dir: str):
+def _run_background_scan(source_dir: str, min_sim: float = 95.0, max_time: float = 120.0):
     SCAN_STATE["scanning"] = True
     SCAN_STATE["scan_error"] = None
     try:
         if source_dir == str(DEMO_ROOT / "Combined_iPhone_Backup"):
             create_demo_workspace(DEMO_ROOT)
         DEFAULT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        res = scan_Backup_directory(source_dir)
+        res, raw_items = scan_Backup_directory(
+            source_dir,
+            min_similarity_pct=min_sim,
+            max_time_window_sec=max_time,
+            return_raw_items=True,
+        )
+        SCAN_STATE["raw_items"] = raw_items
         SCAN_STATE["scan_result"] = res
     except Exception as exc:
         SCAN_STATE["scan_error"] = str(exc)
@@ -83,8 +99,11 @@ def _run_background_scan(source_dir: str):
 
 @app.on_event("startup")
 def startup_init():
-    # Run scan in background thread so http://127.0.0.1:8090 responds immediately!
-    t = threading.Thread(target=_run_background_scan, args=(SCAN_STATE["source_dir"],), daemon=True)
+    t = threading.Thread(
+        target=_run_background_scan,
+        args=(SCAN_STATE["source_dir"], SCAN_STATE["min_similarity_pct"], SCAN_STATE["max_time_window_sec"]),
+        daemon=True,
+    )
     t.start()
 
 
@@ -99,9 +118,39 @@ def get_current_state():
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
+        "min_similarity_pct": SCAN_STATE["min_similarity_pct"],
+        "max_time_window_sec": SCAN_STATE["max_time_window_sec"],
         "scanning": SCAN_STATE["scanning"],
         "scan_error": SCAN_STATE["scan_error"],
         "data": SCAN_STATE["scan_result"],
+    }
+
+
+@app.post("/api/recluster")
+def recluster_cached_items(req: ReclusterRequest):
+    """
+    Instantly re-runs the similarity clustering using cached photo features (no disk re-scan needed!).
+    """
+    if SCAN_STATE["scanning"] or not SCAN_STATE["raw_items"]:
+        raise HTTPException(status_code=400, detail="Scan is still in progress or no items loaded.")
+
+    SCAN_STATE["min_similarity_pct"] = req.min_similarity_pct
+    SCAN_STATE["max_time_window_sec"] = req.max_time_window_sec
+
+    updated = build_scan_response(
+        Path(SCAN_STATE["source_dir"]),
+        SCAN_STATE["raw_items"],
+        min_similarity_pct=req.min_similarity_pct,
+        max_time_window_sec=req.max_time_window_sec,
+    )
+    SCAN_STATE["scan_result"] = updated
+    return {
+        "source_dir": SCAN_STATE["source_dir"],
+        "archive_dir": SCAN_STATE["archive_dir"],
+        "min_similarity_pct": SCAN_STATE["min_similarity_pct"],
+        "max_time_window_sec": SCAN_STATE["max_time_window_sec"],
+        "scanning": False,
+        "data": updated,
     }
 
 
@@ -112,18 +161,26 @@ def trigger_scan(req: ScanRequest):
         raise HTTPException(status_code=400, detail=f"Folder not found: {src}")
 
     SCAN_STATE["source_dir"] = str(src)
+    SCAN_STATE["min_similarity_pct"] = req.min_similarity_pct
+    SCAN_STATE["max_time_window_sec"] = req.max_time_window_sec
     if req.archive_dir:
         SCAN_STATE["archive_dir"] = str(Path(req.archive_dir).expanduser().resolve())
     else:
         SCAN_STATE["archive_dir"] = str(src.parent / "PC_Archive_Moved")
 
     if not SCAN_STATE["scanning"]:
-        t = threading.Thread(target=_run_background_scan, args=(str(src),), daemon=True)
+        t = threading.Thread(
+            target=_run_background_scan,
+            args=(str(src), req.min_similarity_pct, req.max_time_window_sec),
+            daemon=True,
+        )
         t.start()
 
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
+        "min_similarity_pct": SCAN_STATE["min_similarity_pct"],
+        "max_time_window_sec": SCAN_STATE["max_time_window_sec"],
         "scanning": True,
         "data": SCAN_STATE["scan_result"],
     }
@@ -138,12 +195,21 @@ def reset_demo_workspace():
     DEMO_ARCHIVE.mkdir(parents=True, exist_ok=True)
     SCAN_STATE["source_dir"] = str(DEMO_ROOT / "Combined_iPhone_Backup")
     SCAN_STATE["archive_dir"] = str(DEMO_ARCHIVE)
-    SCAN_STATE["scan_result"] = scan_Backup_directory(SCAN_STATE["source_dir"])
+    res, raw_items = scan_Backup_directory(
+        SCAN_STATE["source_dir"],
+        min_similarity_pct=SCAN_STATE["min_similarity_pct"],
+        max_time_window_sec=SCAN_STATE["max_time_window_sec"],
+        return_raw_items=True,
+    )
+    SCAN_STATE["raw_items"] = raw_items
+    SCAN_STATE["scan_result"] = res
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
+        "min_similarity_pct": SCAN_STATE["min_similarity_pct"],
+        "max_time_window_sec": SCAN_STATE["max_time_window_sec"],
         "scanning": False,
-        "data": SCAN_STATE["scan_result"],
+        "data": res,
     }
 
 
@@ -164,7 +230,14 @@ def archive_selected_media(req: ArchiveRequest):
     )
 
     if not req.dry_run:
-        SCAN_STATE["scan_result"] = scan_Backup_directory(SCAN_STATE["source_dir"])
+        moved_set = set(req.selected_ids)
+        SCAN_STATE["raw_items"] = [it for it in SCAN_STATE["raw_items"] if it.id not in moved_set]
+        SCAN_STATE["scan_result"] = build_scan_response(
+            Path(SCAN_STATE["source_dir"]),
+            SCAN_STATE["raw_items"],
+            min_similarity_pct=SCAN_STATE["min_similarity_pct"],
+            max_time_window_sec=SCAN_STATE["max_time_window_sec"],
+        )
 
     return {
         "archive_result": res,
