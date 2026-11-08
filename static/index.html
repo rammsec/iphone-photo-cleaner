@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iPhone 16 & 18 Pro Max — Smart Photo & Video Cleaner (Windows 11 Mode B)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .card-keep {
+      border: 2px solid #10b981;
+      box-shadow: 0 0 20px rgba(16, 185, 129, 0.15);
+    }
+    .card-archive {
+      border: 2px solid #f59e0b;
+      box-shadow: 0 0 18px rgba(245, 158, 11, 0.12);
+    }
+    .badge-keep {
+      background: linear-gradient(135deg, #059669, #10b981);
+    }
+    .badge-archive {
+      background: linear-gradient(135deg, #d97706, #f59e0b);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Top Navigation Header -->
+  <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-emerald-500 flex items-center justify-center text-xl font-bold shadow">
+          📸
+        </div>
+        <div>
+          <h1 class="text-lg font-bold text-white tracking-tight">
+            iPhone 16 & 18 Pro Max — Smart Photo & Video Cleaner
+          </h1>
+          <p class="text-xs text-slate-400">
+            Mode B: Combined Folder Full Backup + SHA-256 PC Archive + USB-C iPhone Prune (Windows 11)
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button onclick="resetDemo()" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+          🔄 Reset Demo Dataset
+        </button>
+        <button onclick="runArchive(true)" class="px-3.5 py-2 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 transition">
+          🧪 Dry-Run Simulation (<span id="selectedCountBtn1">0</span>)
+        </button>
+        <button onclick="runArchive(false)" class="px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 shadow-lg transition">
+          📦 Move Selected to PC Archive & Generate USB Prune (<span id="selectedCountBtn2">0</span>)
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Folder & Summary Bar -->
+  <section class="max-w-7xl mx-auto w-full px-4 pt-5">
+    <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 mb-5">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-3 items-end">
+        <div class="lg:col-span-5">
+          <label class="block text-xs font-semibold text-slate-400 mb-1">
+            Combined Backup Source Folder (16 Pro Max + 18 Pro Max photos & videos):
+          </label>
+          <input id="sourceDirInput" type="text"
+            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            placeholder="C:\Users\You\Pictures\Combined_iPhone_Backup" />
+        </div>
+        <div class="lg:col-span-5">
+          <label class="block text-xs font-semibold text-slate-400 mb-1">
+            PC Archive Destination Folder (Duplicates, Screenshots, WhatsApp, Wishes moved here):
+          </label>
+          <input id="archiveDirInput" type="text"
+            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-indigo-500"
+            placeholder="C:\Users\You\Pictures\PC_Archive_Moved" />
+        </div>
+        <div class="lg:col-span-2 flex gap-2">
+          <button onclick="scanFolder()" class="w-full py-2 px-4 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs transition shadow">
+            🔍 Scan Combined Folder
+          </button>
+        </div>
+      </div>
+
+      <!-- Metrics Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-4 pt-4 border-t border-slate-800/80">
+        <div class="bg-slate-950/70 rounded-xl p-3 border border-slate-800">
+          <div class="text-xs text-slate-400">Total Library Scanned</div>
+          <div class="text-xl font-bold text-white mt-0.5" id="statTotalItems">0</div>
+          <div class="text-[11px] text-slate-500" id="statTotalSize">0 MB</div>
+        </div>
+        <div class="bg-slate-950/70 rounded-xl p-3 border border-emerald-900/50">
+          <div class="text-xs text-emerald-400">Keep on iPhone (Best Quality)</div>
+          <div class="text-xl font-bold text-emerald-300 mt-0.5" id="statKeepCount">0</div>
+          <div class="text-[11px] text-slate-500">Highest sharpness & face scores</div>
+        </div>
+        <div class="bg-slate-950/70 rounded-xl p-3 border border-amber-900/50">
+          <div class="text-xs text-amber-400">Move to PC Archive</div>
+          <div class="text-xl font-bold text-amber-300 mt-0.5" id="statArchiveCount">0</div>
+          <div class="text-[11px] text-amber-400/80" id="statReclaimableSize">0 MB freed on iPhone</div>
+        </div>
+        <div class="bg-slate-950/70 rounded-xl p-3 border border-indigo-900/50">
+          <div class="text-xs text-indigo-400">Similar Photo/Video Groups</div>
+          <div class="text-xl font-bold text-indigo-300 mt-0.5" id="statClusterCount">0</div>
+          <div class="text-[11px] text-slate-500">Cross-phone pHash + Burst AI</div>
+        </div>
+        <div class="bg-slate-950/70 rounded-xl p-3 border border-rose-900/50">
+          <div class="text-xs text-rose-400">Screenshots / WA / Wishes / Banners</div>
+          <div class="text-xl font-bold text-rose-300 mt-0.5" id="statJunkCount">0</div>
+          <div class="text-[11px] text-slate-500">Auto-flagged for PC archive</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex flex-wrap gap-2 border-b border-slate-800 pb-3 mb-5">
+      <button onclick="switchTab('clusters')" id="tab_clusters"
+        class="tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white transition">
+        ✨ Similar Photo & Video Clusters (<span id="tabCountClusters">0</span>)
+      </button>
+      <button onclick="switchTab('junk')" id="tab_junk"
+        class="tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 text-slate-300 hover:bg-slate-800 transition">
+        🧹 Clutter Detector: Screenshots, WhatsApp, Wishes & Banners (<span id="tabCountJunk">0</span>)
+      </button>
+      <button onclick="switchTab('videos')" id="tab_videos"
+        class="tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 text-slate-300 hover:bg-slate-800 transition">
+        🎬 Videos & Large Clips (<span id="tabCountVideos">0</span>)
+      </button>
+      <button onclick="switchTab('usb')" id="tab_usb"
+        class="tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 text-slate-300 hover:bg-slate-800 transition">
+        🔌 Windows 11 USB-C Guide & Prune Script
+      </button>
+    </div>
+  </section>
+
+  <!-- Main Content Area -->
+  <main class="max-w-7xl mx-auto w-full px-4 pb-16 flex-1">
+    <!-- Status Toast / Execution Banner -->
+    <div id="resultBanner" class="hidden mb-6 rounded-2xl border border-emerald-500/40 bg-emerald-950/40 p-4 text-xs"></div>
+
+    <!-- TAB 1: Similar Clusters -->
+    <div id="view_clusters" class="space-y-6"></div>
+
+    <!-- TAB 2: Clutter / Junk Detector -->
+    <div id="view_junk" class="hidden space-y-6"></div>
+
+    <!-- TAB 3: Videos -->
+    <div id="view_videos" class="hidden space-y-4"></div>
+
+    <!-- TAB 4: Windows 11 USB-C Instructions -->
+    <div id="view_usb" class="hidden space-y-6">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+        <h2 class="text-base font-bold text-white flex items-center gap-2">
+          🔌 How Mode B Works on Your Windows 11 PC (iPhone 16 Pro Max & 18 Pro Max)
+        </h2>
+        <ol class="list-decimal list-inside space-y-3 text-xs text-slate-300 leading-relaxed">
+          <li>
+            <strong class="text-white">One-Time iPhone Setting (Crucial for Windows 11 USB-C):</strong>
+            On both your 16 Pro Max and 18 Pro Max, open <code class="bg-slate-800 px-1.5 py-0.5 rounded text-amber-300">Settings → Photos</code>, scroll to the bottom under <em>"Transfer to Mac or PC"</em>, and select <strong class="text-emerald-400">Keep Originals</strong>.
+          </li>
+          <li>
+            <strong class="text-white">Copy Both Phones into One Combined Folder on Your PC:</strong>
+            Plug in Phone 1 via USB-C, open <code class="bg-slate-800 px-1.5 py-0.5 rounded">This PC → Apple iPhone → Internal Storage → DCIM</code>, and copy the folders into a single PC directory (e.g. <code class="bg-slate-800 px-1.5 py-0.5 rounded text-indigo-300">C:\Users\You\Pictures\Combined_iPhone_Backup</code>). Repeat for Phone 2 into that same folder (or subfolders inside it).
+          </li>
+          <li>
+            <strong class="text-white">Review & Click "Move Selected to PC Archive":</strong>
+            This app compares every photo across both phones, keeps the <strong class="text-emerald-400">🌟 Best Quality Shot</strong> in your main folder, and moves duplicates, blurry takes, screenshots, WhatsApp forwards,banners, and New Year/Morning wishes into <code class="bg-slate-800 px-1.5 py-0.5 rounded text-amber-300">PC_Archive_Moved\</code> with <strong class="text-white">SHA-256 verification</strong>.
+          </li>
+          <li>
+            <strong class="text-white">Clean the Connected iPhones over USB-C Automatically:</strong>
+            Every time you archive files, the app generates <code class="bg-slate-800 px-1.5 py-0.5 rounded text-emerald-300">prune_connected_iphone.ps1</code> inside your Archive folder. Plug in your 16 Pro Max (and then 18 Pro Max) over USB-C and run that script—it deletes <em>only</em> the archived duplicates/junk from the iPhone's <code class="bg-slate-800 px-1.5 py-0.5 rounded">DCIM</code> storage while leaving all your best photos on the iPhone!
+          </li>
+        </ol>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    let appState = null;
+    // Set of item IDs currently marked to be moved to PC Archive & pruned from iPhone
+    let selectedArchiveIds = new Set();
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return "0 KB";
+      const k = 1024;
+      const sizes = ["Bytes", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    async function loadState() {
+      const res = await fetch("/api/state");
+      const payload = await res.json();
+      applyPayload(payload);
+    }
+
+    function applyPayload(payload) {
+      appState = payload.data;
+      document.getElementById("sourceDirInput").value = payload.source_dir || "";
+      document.getElementById("archiveDirInput").value = payload.archive_dir || "";
+
+      selectedArchiveIds.clear();
+      Object.values(appState.items || {}).forEach(item => {
+        if (item.recommended_action === "archive") {
+          selectedArchiveIds.add(item.id);
+        }
+      });
+
+      renderAll();
+    }
+
+    function updateSelectedCounters() {
+      const count = selectedArchiveIds.size;
+      document.getElementById("selectedCountBtn1").textContent = count;
+      document.getElementById("selectedCountBtn2").textContent = count;
+      document.getElementById("statArchiveCount").textContent = count;
+
+      let totalItems = Object.keys(appState.items || {}).length;
+      document.getElementById("statKeepCount").textContent = Math.max(0, totalItems - count);
+
+      let reclaimBytes = 0;
+      selectedArchiveIds.forEach(id => {
+        const it = appState.items[id];
+        if (it) reclaimBytes += it.file_size;
+      });
+      document.getElementById("statReclaimableSize").textContent = formatBytes(reclaimBytes) + " freed on iPhone";
+    }
+
+    function toggleItemAction(itemId) {
+      if (selectedArchiveIds.has(itemId)) {
+        selectedArchiveIds.delete(itemId);
+      } else {
+        selectedArchiveIds.add(itemId);
+      }
+      renderAll();
+    }
+
+    function selectWinnerInCluster(clusterId, newWinnerId) {
+      const cluster = (appState.clusters || []).find(c => c.cluster_id === clusterId);
+      if (!cluster) return;
+      cluster.items.forEach(it => {
+        if (it.id === newWinnerId) {
+          selectedArchiveIds.delete(it.id);
+        } else {
+          selectedArchiveIds.add(it.id);
+        }
+      });
+      renderAll();
+    }
+
+    function renderMediaCard(item, clusterId = null) {
+      const isArchive = selectedArchiveIds.has(item.id);
+      const borderClass = isArchive ? "card-archive" : "card-keep";
+      const badgeClass = isArchive ? "badge-archive" : "badge-keep";
+      const badgeText = isArchive ? "📦 MOVE TO PC ARCHIVE" : "🌟 KEEP ON IPHONE";
+
+      const junkBadge = item.junk_category
+        ? `<span class="px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[10px] font-semibold uppercase">${item.junk_category.replace("_", " ")}</span>`
+        : "";
+
+      const liveBadge = item.is_live_photo
+        ? `<span class="px-2 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-sky-300 text-[10px] font-semibold">LIVE PHOTO (.HEIC+.MOV)</span>`
+        : "";
+
+      const makeBestBtn = clusterId && isArchive
+        ? `<button onclick="selectWinnerInCluster('${clusterId}', '${item.id}')" class="px-2.5 py-1 rounded bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold transition">Make Winner</button>`
+        : "";
+
+      return `
+        <div class="bg-slate-900/90 rounded-2xl overflow-hidden flex flex-col justify-between transition ${borderClass}">
+          <div>
+            <div class="relative h-52 bg-slate-950 flex items-center justify-center overflow-hidden">
+              <img src="/api/thumbnail/${item.id}?size=520" alt="${item.filename}" class="max-h-full max-w-full object-contain" loading="lazy" />
+              <div class="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-lg text-[11px] font-extrabold text-white shadow ${badgeClass}">
+                ${badgeText}
+              </div>
+              <div class="absolute top-2.5 right-2.5 px-2 py-1 rounded-lg bg-slate-950/85 border border-slate-700 text-[11px] font-bold text-white">
+                Score: <span class="${item.quality_score >= 70 ? 'text-emerald-400' : 'text-amber-400'}">${item.quality_score}</span>/100
+              </div>
+              <div class="absolute bottom-2 left-2 flex flex-wrap gap-1">
+                ${junkBadge}
+                ${liveBadge}
+              </div>
+            </div>
+
+            <div class="p-3.5 space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <div class="font-bold text-xs text-white truncate" title="${item.rel_path}">${item.filename}</div>
+                <div class="text-[11px] text-slate-400 shrink-0">${formatBytes(item.file_size)}</div>
+              </div>
+
+              <div class="grid grid-cols-3 gap-1.5 text-[11px] bg-slate-950/70 p-2 rounded-lg border border-slate-800/80">
+                <div>
+                  <span class="text-slate-500 block text-[10px]">Sharpness</span>
+                  <span class="font-semibold text-slate-200">${item.sharpness_score}</span>
+                </div>
+                <div>
+                  <span class="text-slate-500 block text-[10px]">Exposure</span>
+                  <span class="font-semibold text-slate-200">${item.exposure_score || '-'}</span>
+                </div>
+                <div>
+                  <span class="text-slate-500 block text-[10px]">Resolution</span>
+                  <span class="font-semibold text-slate-200">${item.width}×${item.height}</span>
+                </div>
+              </div>
+
+              <div class="text-[11px] text-slate-300 bg-slate-950/40 px-2.5 py-1.5 rounded border border-slate-800/60">
+                <span class="text-slate-400">Device:</span> <strong class="text-slate-200">${item.camera_model || 'Unknown'}</strong>
+                <div class="text-amber-300/90 mt-0.5">${item.action_reason || (isArchive ? 'Marked to Move to PC Archive' : 'Selected to Stay on iPhone')}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="px-3.5 pb-3.5 pt-1 flex items-center justify-between gap-2">
+            ${makeBestBtn}
+            <button onclick="toggleItemAction('${item.id}')"
+              class="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                isArchive
+                  ? 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-500/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30'
+              }">
+              ${isArchive ? 'Switch to Keep on iPhone' : 'Switch to Move to PC'}
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAll() {
+      if (!appState) return;
+      const summary = appState.summary || {};
+
+      document.getElementById("statTotalItems").textContent = `${summary.total_items || 0} files`;
+      document.getElementById("statTotalSize").textContent = formatBytes(summary.total_size_bytes || 0);
+      document.getElementById("statClusterCount").textContent = summary.cluster_count || 0;
+
+      const junkCounts = summary.junk_counts || {};
+      const totalJunk = Object.values(junkCounts).reduce((a, b) => a + b, 0);
+      document.getElementById("statJunkCount").textContent = totalJunk;
+
+      document.getElementById("tabCountClusters").textContent = (appState.clusters || []).length;
+      document.getElementById("tabCountJunk").textContent = totalJunk;
+      document.getElementById("tabCountVideos").textContent = (appState.videos || []).length;
+
+      updateSelectedCounters();
+
+      // Render Tab 1: Clusters
+      const clustersEl = document.getElementById("view_clusters");
+      if (!appState.clusters || appState.clusters.length === 0) {
+        clustersEl.innerHTML = `<div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-400">No duplicate or similar photo clusters remaining in this folder!</div>`;
+      } else {
+        clustersEl.innerHTML = appState.clusters.map((cluster, idx) => `
+          <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
+              <div>
+                <span class="px-2.5 py-1 rounded-lg bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs font-bold mr-2">
+                  Group #${idx + 1} (${cluster.count} similar ${cluster.media_type}s)
+                </span>
+                <span class="text-xs text-slate-400">Captured around ${cluster.capture_time_iso}</span>
+              </div>
+              <div class="text-xs font-semibold text-amber-300">
+                Reclaims ${formatBytes(cluster.reclaimable_bytes)} on iPhone
+              </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              ${cluster.items.map(it => renderMediaCard(it, cluster.cluster_id)).join("")}
+            </div>
+          </div>
+        `).join("");
+      }
+
+      // Render Tab 2: Clutter / Junk categories
+      const junkEl = document.getElementById("view_junk");
+      const junkMeta = [
+        { key: "screenshot", title: "📱 iPhone Screenshots", desc: "Detected via exact iPhone 16/18 Pro Max resolution, PNG UI layout, or EXIF Screenshot tag." },
+        { key: "whatsapp_forward", title: "💬 WhatsApp Forwarded Images", desc: "Detected via WA naming patterns (IMG-YYYYMMDD-WAxxxx), stripped camera EXIF, and standard WA compression." },
+        { key: "wish_greeting", title: "🎉 Wish Messages ('Happy New Year', 'Good Morning', Greetings)", desc: "Detected via high-saturation festive graphics + dense overlaid greeting typography without camera EXIF." },
+        { key: "banner", title: "🪧 Promotional Banners & Flyers", desc: "Detected via extreme banner aspect ratios or poster text blocks over flat graphic backgrounds." },
+        { key: "blurry", title: "🌫️ Blurry / Out-of-Focus Camera Shots", desc: "Camera shots with severe motion blur or low Laplacian sharpness score." }
+      ];
+
+      junkEl.innerHTML = junkMeta.map(cat => {
+        const list = (appState.junk && appState.junk[cat.key]) || [];
+        if (list.length === 0) return "";
+        return `
+          <div class="bg-slate-900/60 border border-slate-800 rounded-2xl p-4 space-y-3">
+            <div class="border-b border-slate-800 pb-2">
+              <h3 class="text-sm font-bold text-white">${cat.title} (${list.length})</h3>
+              <p class="text-xs text-slate-400">${cat.desc}</p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              ${list.map(it => renderMediaCard(it)).join("")}
+            </div>
+          </div>
+        `;
+      }).join("") || `<div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-400">No screenshots, WhatsApp forwards, wish cards, or banners found!</div>`;
+
+      // Render Tab 3: Videos
+      const videosEl = document.getElementById("view_videos");
+      const videos = appState.videos || [];
+      if (videos.length === 0) {
+        videosEl.innerHTML = `<div class="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center text-sm text-slate-400">No standalone videos found.</div>`;
+      } else {
+        videosEl.innerHTML = `
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            ${videos.map(v => renderMediaCard(v, v.cluster_id)).join("")}
+          </div>
+        `;
+      }
+    }
+
+    function switchTab(tabName) {
+      ["clusters", "junk", "videos", "usb"].forEach(t => {
+        document.getElementById(`view_${t}`).classList.toggle("hidden", t !== tabName);
+        const btn = document.getElementById(`tab_${t}`);
+        if (t === tabName) {
+          btn.className = "tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white transition";
+        } else {
+          btn.className = "tab-btn px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 text-slate-300 hover:bg-slate-800 transition";
+        }
+      });
+    }
+
+    async function scanFolder() {
+      const source_dir = document.getElementById("sourceDirInput").value.trim();
+      const archive_dir = document.getElementById("archiveDirInput").value.trim();
+      const res = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_dir, archive_dir })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        alert("Scan failed: " + (err.detail || res.statusText));
+        return;
+      }
+      const payload = await res.json();
+      applyPayload(payload);
+    }
+
+    async function resetDemo() {
+      const res = await fetch("/api/reset-demo", { method: "POST" });
+      const payload = await res.json();
+      document.getElementById("resultBanner").classList.add("hidden");
+      applyPayload(payload);
+    }
+
+    async function runArchive(dryRun) {
+      const ids = Array.from(selectedArchiveIds);
+      if (ids.length === 0) {
+        alert("No files are currently selected for archiving.");
+        return;
+      }
+      const archive_dir = document.getElementById("archiveDirInput").value.trim();
+      const res = await fetch("/api/archive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          selected_ids: ids,
+          archive_dir: archive_dir || null,
+          dry_run: dryRun,
+          prune_connected_iphone: false
+        })
+      });
+      const out = await res.json();
+      const ar = out.archive_result;
+      const banner = document.getElementById("resultBanner");
+      banner.classList.remove("hidden");
+      banner.innerHTML = `
+        <div class="font-bold text-sm text-emerald-300 mb-1">
+          ${ar.dry_run ? "🧪 Dry-Run Simulation Complete!" : "✅ SHA-256 Verified Move to PC Archive Complete!"}
+        </div>
+        <div class="text-slate-200 space-y-1">
+          <div>• Processed <strong>${ar.processed_count} files</strong> (${formatBytes(ar.total_bytes_archived)}) into <code class="bg-slate-900 px-1.5 py-0.5 rounded text-amber-300">${ar.archive_root}</code></div>
+          <div>• Windows 11 USB-C iPhone Prune Script generated at: <code class="bg-slate-900 px-1.5 py-0.5 rounded text-emerald-300">${ar.windows_usb_script}</code> (${ar.iphone_filenames_queued} iPhone filenames queued)</div>
+          <div>• Audit log saved: <code class="bg-slate-900 px-1.5 py-0.5 rounded text-slate-400">${ar.audit_log}</code></div>
+        </div>
+      `;
+
+      if (!dryRun && out.updated_data) {
+        appState = out.updated_data;
+        selectedArchiveIds.clear();
+        Object.values(appState.items || {}).forEach(item => {
+          if (item.recommended_action === "archive") selectedArchiveIds.add(item.id);
+        });
+        renderAll();
+      }
+    }
+
+    loadState();
+  </script>
+</body>
+</html>
