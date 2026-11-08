@@ -1,7 +1,9 @@
 """
 FastAPI Backend for iPhone 16 Pro Max / 18 Pro Max Photo & Video Cleaner (Mode B: Full Backup + Smart Prune).
-Starts listening on port 8090 immediately and runs the initial folder scan in a background thread.
-Supports instant re-clustering when the user changes the Similarity % Threshold (default 95%) or Time Window!
+Includes:
+- Multi-Core Turbo Scan with live progress bar (processed / total, files/sec)
+- Instant Re-Clustering when changing the 95% Similarity slider or Time Window
+- 1-Click Auto-Update (`git pull`) & Server Restart endpoint (`/api/self-update`) so the user can update from the browser!
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -50,6 +54,10 @@ SCAN_STATE: Dict = {
     "min_similarity_pct": 95.0,
     "max_time_window_sec": 120.0,
     "scanning": False,
+    "progress_done": 0,
+    "progress_total": 0,
+    "progress_file": "",
+    "progress_rate": 0.0,
     "scan_error": None,
     "raw_items": [],
     "scan_result": None,
@@ -75,9 +83,18 @@ class ArchiveRequest(BaseModel):
     prune_connected_iphone: bool = False
 
 
+def _on_progress(done: int, total: int, filename: str, rate: float):
+    SCAN_STATE["progress_done"] = done
+    SCAN_STATE["progress_total"] = total
+    SCAN_STATE["progress_file"] = filename
+    SCAN_STATE["progress_rate"] = rate
+
+
 def _run_background_scan(source_dir: str, min_sim: float = 95.0, max_time: float = 120.0):
     SCAN_STATE["scanning"] = True
     SCAN_STATE["scan_error"] = None
+    SCAN_STATE["progress_done"] = 0
+    SCAN_STATE["progress_total"] = 0
     try:
         if source_dir == str(DEMO_ROOT / "Combined_iPhone_Backup"):
             create_demo_workspace(DEMO_ROOT)
@@ -87,6 +104,7 @@ def _run_background_scan(source_dir: str, min_sim: float = 95.0, max_time: float
             min_similarity_pct=min_sim,
             max_time_window_sec=max_time,
             return_raw_items=True,
+            progress_callback=_on_progress,
         )
         SCAN_STATE["raw_items"] = raw_items
         SCAN_STATE["scan_result"] = res
@@ -121,6 +139,12 @@ def get_current_state():
         "min_similarity_pct": SCAN_STATE["min_similarity_pct"],
         "max_time_window_sec": SCAN_STATE["max_time_window_sec"],
         "scanning": SCAN_STATE["scanning"],
+        "progress": {
+            "done": SCAN_STATE["progress_done"],
+            "total": SCAN_STATE["progress_total"],
+            "file": SCAN_STATE["progress_file"],
+            "rate": SCAN_STATE["progress_rate"],
+        },
         "scan_error": SCAN_STATE["scan_error"],
         "data": SCAN_STATE["scan_result"],
     }
@@ -128,9 +152,6 @@ def get_current_state():
 
 @app.post("/api/recluster")
 def recluster_cached_items(req: ReclusterRequest):
-    """
-    Instantly re-runs the similarity clustering using cached photo features (no disk re-scan needed!).
-    """
     if SCAN_STATE["scanning"] or not SCAN_STATE["raw_items"]:
         raise HTTPException(status_code=400, detail="Scan is still in progress or no items loaded.")
 
@@ -184,6 +205,26 @@ def trigger_scan(req: ScanRequest):
         "scanning": True,
         "data": SCAN_STATE["scan_result"],
     }
+
+
+@app.post("/api/self-update")
+def self_update_from_github():
+    """
+    Runs `git pull` on the user's Windows 11 PC and restarts the server process automatically.
+    """
+    try:
+        proc = subprocess.run(["git", "pull"], cwd=str(BASE_DIR), capture_output=True, text=True, timeout=30)
+        git_out = (proc.stdout + "\n" + proc.stderr).strip()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"git pull failed: {exc}")
+
+    def _restart_later():
+        import time
+        time.sleep(0.8)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_restart_later, daemon=True).start()
+    return {"status": "restarting", "git_output": git_out}
 
 
 @app.post("/api/reset-demo")
@@ -270,11 +311,16 @@ def get_media_thumbnail(item_id: str, size: int = Query(520, ge=120, le=1600)):
             else:
                 img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         else:
-            img = Image.open(filepath).convert("RGB")
+            img = Image.open(filepath)
+            try:
+                img.draft("RGB", (size, size))
+            except Exception:
+                pass
+            img = img.convert("RGB")
 
-        img.thumbnail((size, size), Image.Resampling.LANCZOS)
+        img.thumbnail((size, size), Image.Resampling.BILINEAR)
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=86)
+        img.save(buf, format="JPEG", quality=82)
         buf.seek(0)
         return StreamingResponse(buf, media_type="image/jpeg")
     except Exception as exc:

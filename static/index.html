@@ -47,6 +47,9 @@
       </div>
 
       <div class="flex items-center gap-2">
+        <button onclick="selfUpdateServer()" class="px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-500/40 transition" title="Pull latest GitHub updates & restart server automatically">
+          ⚡ 1-Click Update & Restart
+        </button>
         <button onclick="resetDemo()" class="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
           🔄 Reset Demo
         </button>
@@ -244,14 +247,27 @@
 
       const banner = document.getElementById("resultBanner");
       if (payload.scanning) {
+        const p = payload.progress || {};
+        const done = p.done || 0;
+        const total = p.total || 0;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 5;
+        const rate = p.rate || 0;
         banner.classList.remove("hidden");
         banner.innerHTML = `
-          <div class="flex items-center gap-3 text-indigo-300 font-semibold text-sm">
-            <span class="animate-spin text-lg">⏳</span>
-            <span>Scanning your iPhone photos & videos in <code>${payload.source_dir}</code>... Watch the PowerShell window for live file progress! This page will auto-refresh as soon as scanning finishes.</span>
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-indigo-300 font-semibold text-sm">
+              <div class="flex items-center gap-2">
+                <span class="animate-spin text-lg">⚡</span>
+                <span>Multi-Core i7 Turbo Scan in progress: <strong>${done} / ${total || '...'} files</strong> (${pct}%) — <strong>${rate} files/sec</strong></span>
+              </div>
+              <span class="text-xs text-slate-400">${p.file || ''}</span>
+            </div>
+            <div class="w-full h-2.5 bg-slate-900 rounded-full overflow-hidden border border-slate-800">
+              <div class="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-500" style="width: ${pct}%"></div>
+            </div>
           </div>
         `;
-        setTimeout(loadState, 2500);
+        setTimeout(loadState, 1200);
         return;
       } else if (payload.scan_error) {
         banner.classList.remove("hidden");
@@ -593,6 +609,16 @@
         });
         renderAll();
       }
+    }
+
+    async function selfUpdateServer() {
+      const banner = document.getElementById("resultBanner");
+      banner.classList.remove("hidden");
+      banner.innerHTML = `<div class="text-indigo-300 font-bold">⚡ Pulling latest update from GitHub & restarting server... Page will reload in 3 seconds.</div>`;
+      try {
+        await fetch("/api/self-update", { method: "POST" });
+      } catch (e) {}
+      setTimeout(() => window.location.reload(), 3000);
     }
 
     loadState();
