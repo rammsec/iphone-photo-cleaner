@@ -29,8 +29,16 @@ from usb_archiver import execute_archive_plan
 
 BASE_DIR = Path(__file__).parent.resolve()
 DEMO_ROOT = BASE_DIR / "demo_workspace"
-DEFAULT_SOURCE_DIR = DEMO_ROOT / "Combined_iPhone_Backup"
-DEFAULT_ARCHIVE_DIR = DEMO_ROOT / "PC_Archive_Moved"
+
+USER_PICTURES_BACKUP = Path.home() / "Pictures" / "Combined_iPhone_Backup"
+USER_PICTURES_ARCHIVE = Path.home() / "Pictures" / "PC_Archive_Moved"
+
+if USER_PICTURES_BACKUP.exists() and any(USER_PICTURES_BACKUP.iterdir()):
+    DEFAULT_SOURCE_DIR = USER_PICTURES_BACKUP
+    DEFAULT_ARCHIVE_DIR = USER_PICTURES_ARCHIVE
+else:
+    DEFAULT_SOURCE_DIR = DEMO_ROOT / "Combined_iPhone_Backup"
+    DEFAULT_ARCHIVE_DIR = DEMO_ROOT / "PC_Archive_Moved"
 
 app = FastAPI(title="iPhone 16/18 Pro Max Photo & Video Cleaner (Windows 11 Edition)")
 
