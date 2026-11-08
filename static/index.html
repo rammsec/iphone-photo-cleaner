@@ -576,6 +576,16 @@
         return;
       }
       const archive_dir = document.getElementById("archiveDirInput").value.trim();
+      const banner = document.getElementById("resultBanner");
+      banner.classList.remove("hidden");
+      banner.innerHTML = `
+        <div class="flex items-center gap-3 text-amber-300 font-bold text-sm">
+          <span class="animate-spin text-lg">📦</span>
+          <span>${dryRun ? 'Running Dry-Run Simulation' : 'Moving & Verifying'} <strong>${ids.length} selected files</strong> into <code>${archive_dir}</code>... Please wait (~10-60 seconds for thousands of files).</span>
+        </div>
+      `;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+
       const res = await fetch("/api/archive", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -586,13 +596,16 @@
           prune_connected_iphone: false
         })
       });
+      if (!res.ok) {
+        const err = await res.json();
+        banner.innerHTML = `<div class="text-rose-400 font-bold">Archive Error: ${err.detail || res.statusText}</div>`;
+        return;
+      }
       const out = await res.json();
       const ar = out.archive_result;
-      const banner = document.getElementById("resultBanner");
-      banner.classList.remove("hidden");
       banner.innerHTML = `
         <div class="font-bold text-sm text-emerald-300 mb-1">
-          ${ar.dry_run ? "🧪 Dry-Run Simulation Complete!" : "✅ SHA-256 Verified Move to PC Archive Complete!"}
+          ${ar.dry_run ? "🧪 Dry-Run Simulation Complete!" : "✅ Verified Move to PC Archive Complete!"}
         </div>
         <div class="text-slate-200 space-y-1">
           <div>• Processed <strong>${ar.processed_count} files</strong> (${formatBytes(ar.total_bytes_archived)}) into <code class="bg-slate-900 px-1.5 py-0.5 rounded text-amber-300">${ar.archive_root}</code></div>
