@@ -1,5 +1,7 @@
 """
 FastAPI Backend for iPhone 16 Pro Max / 18 Pro Max Photo & Video Cleaner (Mode B: Full Backup + Smart Prune).
+Starts listening on port 8090 immediately and runs the initial folder scan in a background thread
+so the browser never gets "Unable to reach site" while thousands of photos are being analyzed.
 """
 
 from __future__ import annotations
@@ -7,13 +9,13 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import cv2
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel
 
@@ -42,10 +44,11 @@ else:
 
 app = FastAPI(title="iPhone 16/18 Pro Max Photo & Video Cleaner (Windows 11 Edition)")
 
-# Global in-memory scan state
 SCAN_STATE: Dict = {
     "source_dir": str(DEFAULT_SOURCE_DIR),
     "archive_dir": str(DEFAULT_ARCHIVE_DIR),
+    "scanning": False,
+    "scan_error": None,
     "scan_result": None,
 }
 
@@ -62,11 +65,27 @@ class ArchiveRequest(BaseModel):
     prune_connected_iphone: bool = False
 
 
+def _run_background_scan(source_dir: str):
+    SCAN_STATE["scanning"] = True
+    SCAN_STATE["scan_error"] = None
+    try:
+        if source_dir == str(DEMO_ROOT / "Combined_iPhone_Backup"):
+            create_demo_workspace(DEMO_ROOT)
+        DEFAULT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        res = scan_Backup_directory(source_dir)
+        SCAN_STATE["scan_result"] = res
+    except Exception as exc:
+        SCAN_STATE["scan_error"] = str(exc)
+        print(f"[ERROR] Scan failed: {exc}", flush=True)
+    finally:
+        SCAN_STATE["scanning"] = False
+
+
 @app.on_event("startup")
 def startup_init():
-    create_demo_workspace(DEMO_ROOT)
-    DEFAULT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    SCAN_STATE["scan_result"] = scan_Backup_directory(str(DEFAULT_SOURCE_DIR))
+    # Run scan in background thread so http://127.0.0.1:8090 responds immediately!
+    t = threading.Thread(target=_run_background_scan, args=(SCAN_STATE["source_dir"],), daemon=True)
+    t.start()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -77,12 +96,11 @@ def index_page():
 
 @app.get("/api/state")
 def get_current_state():
-    if SCAN_STATE["scan_result"] is None:
-        create_demo_workspace(DEMO_ROOT)
-        SCAN_STATE["scan_result"] = scan_Backup_directory(SCAN_STATE["source_dir"])
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
+        "scanning": SCAN_STATE["scanning"],
+        "scan_error": SCAN_STATE["scan_error"],
         "data": SCAN_STATE["scan_result"],
     }
 
@@ -99,12 +117,15 @@ def trigger_scan(req: ScanRequest):
     else:
         SCAN_STATE["archive_dir"] = str(src.parent / "PC_Archive_Moved")
 
-    result = scan_Backup_directory(str(src))
-    SCAN_STATE["scan_result"] = result
+    if not SCAN_STATE["scanning"]:
+        t = threading.Thread(target=_run_background_scan, args=(str(src),), daemon=True)
+        t.start()
+
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
-        "data": result,
+        "scanning": True,
+        "data": SCAN_STATE["scan_result"],
     }
 
 
@@ -113,13 +134,15 @@ def reset_demo_workspace():
     if DEMO_ROOT.exists():
         shutil.rmtree(DEMO_ROOT)
     create_demo_workspace(DEMO_ROOT)
-    DEFAULT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    SCAN_STATE["source_dir"] = str(DEFAULT_SOURCE_DIR)
-    SCAN_STATE["archive_dir"] = str(DEFAULT_ARCHIVE_DIR)
-    SCAN_STATE["scan_result"] = scan_Backup_directory(str(DEFAULT_SOURCE_DIR))
+    DEMO_ARCHIVE = DEMO_ROOT / "PC_Archive_Moved"
+    DEMO_ARCHIVE.mkdir(parents=True, exist_ok=True)
+    SCAN_STATE["source_dir"] = str(DEMO_ROOT / "Combined_iPhone_Backup")
+    SCAN_STATE["archive_dir"] = str(DEMO_ARCHIVE)
+    SCAN_STATE["scan_result"] = scan_Backup_directory(SCAN_STATE["source_dir"])
     return {
         "source_dir": SCAN_STATE["source_dir"],
         "archive_dir": SCAN_STATE["archive_dir"],
+        "scanning": False,
         "data": SCAN_STATE["scan_result"],
     }
 
@@ -127,7 +150,7 @@ def reset_demo_workspace():
 @app.post("/api/archive")
 def archive_selected_media(req: ArchiveRequest):
     if not SCAN_STATE["scan_result"]:
-        raise HTTPException(status_code=400, detail="No active scan. Please run a scan first.")
+        raise HTTPException(status_code=400, detail="No active scan. Please wait for scan to finish.")
 
     archive_dir = req.archive_dir or SCAN_STATE["archive_dir"]
     items_by_id = SCAN_STATE["scan_result"]["items"]
@@ -140,7 +163,6 @@ def archive_selected_media(req: ArchiveRequest):
         prune_connected_iphone=req.prune_connected_iphone,
     )
 
-    # Re-scan source directory after real move so UI reflects updated library immediately
     if not req.dry_run:
         SCAN_STATE["scan_result"] = scan_Backup_directory(SCAN_STATE["source_dir"])
 

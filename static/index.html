@@ -200,9 +200,30 @@
     }
 
     function applyPayload(payload) {
-      appState = payload.data;
       document.getElementById("sourceDirInput").value = payload.source_dir || "";
       document.getElementById("archiveDirInput").value = payload.archive_dir || "";
+
+      const banner = document.getElementById("resultBanner");
+      if (payload.scanning) {
+        banner.classList.remove("hidden");
+        banner.innerHTML = `
+          <div class="flex items-center gap-3 text-indigo-300 font-semibold text-sm">
+            <span class="animate-spin text-lg">⏳</span>
+            <span>Scanning your iPhone photos & videos in <code>${payload.source_dir}</code>... Watch the PowerShell window for live file progress! This page will auto-refresh as soon as scanning finishes.</span>
+          </div>
+        `;
+        setTimeout(loadState, 2500);
+        return;
+      } else if (payload.scan_error) {
+        banner.classList.remove("hidden");
+        banner.innerHTML = `<div class="text-rose-400 font-bold">Scan Error: ${payload.scan_error}</div>`;
+        return;
+      } else {
+        banner.classList.add("hidden");
+      }
+
+      appState = payload.data;
+      if (!appState) return;
 
       selectedArchiveIds.clear();
       Object.values(appState.items || {}).forEach(item => {
