@@ -287,6 +287,10 @@ def execute_archive_plan(
     archive_root = Path(archive_dir_str).expanduser().resolve()
     archive_root.mkdir(parents=True, exist_ok=True)
 
+    # Pre-create all organized category folders so the folder structure is always visible
+    for sub in list(CATEGORY_FOLDER_MAP.values()) + ["Duplicates_&_Alternate_Takes", "Large_Videos"]:
+        (archive_root / sub).mkdir(parents=True, exist_ok=True)
+
     progress_log_path = archive_root / "archive_progress.log"
     queue_plan_path = archive_root / "archive_queue_plan.json"
 

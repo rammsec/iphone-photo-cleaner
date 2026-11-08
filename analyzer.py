@@ -1,14 +1,22 @@
 """
 High-Speed Multi-Core Photo & Video Analyzer for iPhone 16 Pro Max / 18 Pro Max (Optimized for Intel i7 / 16GB RAM).
 
-Speed Optimizations (15x - 30x faster):
-1. Multi-Core Parallel Execution (`ProcessPoolExecutor` / `ThreadPoolExecutor` across all i7 CPU threads).
-2. Fast HEIC/JPEG Draft/Thumbnail Decoding (decodes at ~512px instead of full 24MP/48MP resolution).
-3. Persistent Disk Cache (`.iphone_scan_cache.json` inside source folder):
-   - Any photo already analyzed is loaded in 0.0001s on future runs or restarts!
-4. O(N) Time-Window + Hash Bucketing for Clustering:
-   - Avoids O(N^2) pairwise comparisons across thousands of photos.
-5. Live Progress Callback (`processed / total`, `items/sec`, ETA) streamed to the Web UI.
+Key iOS-Specific Intelligence:
+1. Real iPhone Camera vs. WhatsApp/Social Forwards on iOS:
+   - On iOS, WhatsApp forwards, wish cards ("Happy New Year", "Good Morning"), and banners saved to Photos
+     are renamed by iOS to `IMG_xxxx.JPG` / `.PNG` — NOT Android's `IMG-YYYYMMDD-WAxxxx.jpg`!
+   - However, genuine iPhone 16/18 Pro Max camera photos ALWAYS contain Apple Camera/Lens EXIF (`Make=Apple`, `Model=iPhone...`),
+     whereas WhatsApp/social forwards have stripped EXIF (`has_camera_exif=False`).
+   - Our detector uses EXIF presence + text/typography layout + color saturation + aspect ratio to accurately classify:
+     * `screenshot` (Exact iPhone screen resolutions / PNG UI / EXIF Screenshot tag)
+     * `banner` (Wide/tall promotional aspect ratios >= 2.0:1 or dense flyer text layout)
+     * `wish_greeting` ("Happy New Year" / "Good Morning" / festival cards: vibrant colors + overlaid text regions + no camera EXIF)
+     * `whatsapp_forward` (Any remaining stripped-EXIF social/forwarded JPEG/PNG/WebP saved in DCIM)
+     * `blurry` (Out-of-focus or motion-blurred camera shots)
+2. Translation-Tolerant 95% Similarity Engine:
+   - Handheld iPhone multi-take shots shift slightly by a few pixels between takes.
+   - Combines translation-invariant HSV Color/Luminance Histogram correlation + Perceptual Hashes (pHash/dHash) +
+     EXIF Timestamp proximity + GPS Location (within 50m) so real handheld duplicate takes score >= 95%!
 """
 
 from __future__ import annotations
@@ -40,6 +48,8 @@ except ImportError:
 PHOTO_EXTENSIONS = {".heic", ".heif", ".jpg", ".jpeg", ".png", ".webp", ".dng", ".tif", ".tiff"}
 VIDEO_EXTENSIONS = {".mov", ".mp4", ".m4v"}
 
+CACHE_VERSION = "v3_ios_tuned"
+
 IPHONE_SCREENSHOT_RESOLUTIONS = {
     (1320, 2868), (2868, 1320),  # 16 Pro Max / 18 Pro Max
     (1344, 2992), (2992, 1344),  # 18 Pro Max (6.9"+)
@@ -48,6 +58,10 @@ IPHONE_SCREENSHOT_RESOLUTIONS = {
     (1206, 2622), (2622, 1206),  # 16 Pro
     (1179, 2556), (2556, 1179),  # 14/15 Pro
     (1170, 2532), (2532, 1170),  # 12/13/14
+    (1125, 2436), (2436, 1125),
+    (1242, 2688), (2688, 1242),
+    (828, 1792), (1792, 828),
+    (750, 1334), (1334, 750),
 }
 
 _FACE_CASCADE = None
@@ -164,13 +178,15 @@ def extract_exif_metadata(img: Image.Image, filepath: str) -> Tuple[float, str, 
                 tag = ExifTags.TAGS.get(tag_id, tag_id)
                 if tag == "Model" and val:
                     camera_model = str(val).strip()
-                    if "iPhone" in camera_model or "Apple" in camera_model:
+                    if any(k in camera_model for k in ("iPhone", "Apple", "Canon", "Sony", "Nikon", "Pixel", "Galaxy")):
                         has_camera_exif = True
-                elif tag == "Make" and val and "Apple" in str(val):
-                    has_camera_exif = True
+                elif tag == "Make" and val:
+                    if any(k in str(val) for k in ("Apple", "Canon", "Sony", "Nikon", "Google", "Samsung")):
+                        has_camera_exif = True
                 elif tag in ("DateTimeOriginal", "DateTime") and val:
                     try:
-                        dt = datetime.strptime(str(val).strip(), "%Y:%m:%d %H:%M:%S")
+                        clean_dt = str(val).strip()[:19]
+                        dt = datetime.strptime(clean_dt, "%Y:%m:%d %H:%M:%S")
                         capture_ts = dt.timestamp()
                     except Exception:
                         pass
@@ -183,11 +199,12 @@ def extract_exif_metadata(img: Image.Image, filepath: str) -> Tuple[float, str, 
                     tag = ExifTags.TAGS.get(tag_id, tag_id)
                     if tag == "DateTimeOriginal" and val:
                         try:
-                            dt = datetime.strptime(str(val).strip(), "%Y:%m:%d %H:%M:%S")
+                            clean_dt = str(val).strip()[:19]
+                            dt = datetime.strptime(clean_dt, "%Y:%m:%d %H:%M:%S")
                             capture_ts = dt.timestamp()
                         except Exception:
                             pass
-                    elif tag == "LensModel" and val:
+                    elif tag in ("LensModel", "LensMake", "FocalLength", "FNumber", "ExposureTime") and val:
                         has_camera_exif = True
                     elif tag == "UserComment" and val and "Screenshot" in str(val):
                         is_exif_screenshot = True
@@ -213,22 +230,36 @@ def extract_exif_metadata(img: Image.Image, filepath: str) -> Tuple[float, str, 
 
 
 def compute_spatial_scene_vector(cv_bgr: np.ndarray) -> List[float]:
-    small = cv2.resize(cv_bgr, (90, 90), interpolation=cv2.INTER_AREA)
+    """
+    Computes a translation-tolerant global + 2x2 quadrant HSV color & luminance histogram vector.
+    Allows slight handheld camera movement between burst shots while still distinguishing different scenes.
+    """
+    small = cv2.resize(cv_bgr, (120, 120), interpolation=cv2.INTER_AREA)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    feats: List[float] = []
-    for gy in range(3):
-        for gx in range(3):
-            patch = hsv[gy * 30 : (gy + 1) * 30, gx * 30 : (gx + 1) * 30]
-            h_hist = cv2.calcHist([patch], [0], None, [5], [0, 180]).flatten()
-            h_hist = h_hist / (np.sum(h_hist) + 1e-6)
-            s_mean = float(np.mean(patch[:, :, 1])) / 255.0
-            s_std = float(np.std(patch[:, :, 1])) / 255.0
-            v_mean = float(np.mean(patch[:, :, 2])) / 255.0
-            v_std = float(np.std(patch[:, :, 2])) / 255.0
-            feats.extend(h_hist.tolist())
-            feats.extend([s_mean, s_std, v_mean, v_std])
 
-    vec = np.array(feats, dtype=np.float32)
+    # 1. Global HSV histogram (12 Hue bins + 6 Sat bins + 6 Val bins = 24 floats)
+    h_glob = cv2.calcHist([hsv], [0], None, [12], [0, 180]).flatten()
+    s_glob = cv2.calcHist([hsv], [1], None, [6], [0, 256]).flatten()
+    v_glob = cv2.calcHist([hsv], [2], None, [6], [0, 256]).flatten()
+    glob_vec = np.concatenate([
+        h_glob / (np.sum(h_glob) + 1e-6),
+        s_glob / (np.sum(s_glob) + 1e-6),
+        v_glob / (np.sum(v_glob) + 1e-6),
+    ])
+
+    # 2. Soft 2x2 Quadrant HSV stats (60x60 each -> 8 floats per quadrant = 32 floats)
+    quad_feats: List[float] = []
+    for qy in range(2):
+        for qx in range(2):
+            patch = hsv[qy * 60 : (qy + 1) * 60, qx * 60 : (qx + 1) * 60]
+            h_q = cv2.calcHist([patch], [0], None, [6], [0, 180]).flatten()
+            h_q = h_q / (np.sum(h_q) + 1e-6)
+            s_m = float(np.mean(patch[:, :, 1])) / 255.0
+            v_m = float(np.mean(patch[:, :, 2])) / 255.0
+            quad_feats.extend(h_q.tolist())
+            quad_feats.extend([s_m, v_m])
+
+    vec = np.concatenate([glob_vec * 1.2, np.array(quad_feats, dtype=np.float32)])
     norm = float(np.linalg.norm(vec))
     if norm > 1e-6:
         vec = vec / norm
@@ -236,16 +267,13 @@ def compute_spatial_scene_vector(cv_bgr: np.ndarray) -> List[float]:
 
 
 def score_image_quality_fast(small_gray: np.ndarray, orig_width: int, orig_height: int) -> dict:
-    """
-    Fast quality scorer operating on an already downscaled (~480px) grayscale array.
-    """
     lap_var = float(cv2.Laplacian(small_gray, cv2.CV_64F).var())
     gx = cv2.Sobel(small_gray, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(small_gray, cv2.CV_32F, 0, 1, ksize=3)
     sobel_mag = float(np.mean(cv2.magnitude(gx, gy)))
 
     sharpness_score = min(100.0, (np.log1p(lap_var) / np.log1p(650.0)) * 75.0 + min(25.0, sobel_mag / 2.2))
-    is_blurry = lap_var < 15.0
+    is_blurry = lap_var < 18.0
 
     mean_brightness = float(np.mean(small_gray))
     std_contrast = float(np.std(small_gray))
@@ -260,7 +288,6 @@ def score_image_quality_fast(small_gray: np.ndarray, orig_width: int, orig_heigh
     faces_count = 0
     face_score = 50.0
 
-    # Run fast face check on 280px image so it takes < 2ms per photo
     if _FACE_CASCADE is not None:
         try:
             h, w = small_gray.shape[:2]
@@ -305,32 +332,50 @@ def detect_junk_category(
     small_bgr: np.ndarray,
     is_blurry: bool,
 ) -> Tuple[Optional[str], float, List[str]]:
+    """
+    iOS-Tuned Clutter & Social Junk Detector:
+    - Catches iPhone Screenshots (.PNG or exact screen dimensions)
+    - Catches Banners / Flyers / Tall stitched images
+    - Catches Wish Greetings ("Happy New Year", "Good Morning", festival cards)
+    - Catches WhatsApp Forwards saved on iPhone (even when renamed to `IMG_xxxx.JPG` by iOS!)
+    - Catches Blurry camera photos
+    """
     reasons: List[str] = []
     fname_lower = filename.lower()
 
+    # 1. Explicit Screenshot Check
     if is_exif_screenshot or "screenshot" in fname_lower or fname_lower.startswith("img_s"):
         reasons.append("EXIF / Filename tagged as iPhone Screenshot")
         return "screenshot", 0.98, reasons
 
     if ext == ".png" and (width, height) in IPHONE_SCREENSHOT_RESOLUTIONS:
-        reasons.append(f"PNG matching exact iPhone Pro Max screen resolution ({width}x{height})")
+        reasons.append(f"PNG matching exact iPhone screen resolution ({width}x{height})")
         return "screenshot", 0.96, reasons
 
     if not has_camera_exif and (width, height) in IPHONE_SCREENSHOT_RESOLUTIONS:
         reasons.append(f"Exact iPhone screen dimensions ({width}x{height}) without camera lens EXIF")
-        return "screenshot", 0.90, reasons
+        return "screenshot", 0.92, reasons
 
+    # Any PNG without camera EXIF that has phone-like vertical aspect ratio (approx 19.5:9) is also a mobile screenshot
     aspect_ratio = max(width, height) / max(1.0, min(width, height))
+    if ext == ".png" and not has_camera_exif and 2.05 <= aspect_ratio <= 2.25:
+        reasons.append(f"Mobile screen aspect ratio PNG ({width}x{height}) with no camera EXIF")
+        return "screenshot", 0.89, reasons
 
-    # Fast check: if it IS a genuine iPhone camera photo (has_camera_exif=True) and not blurry,
-    # it is NOT a WhatsApp forward, wish graphic, or web banner — skip heavy contour math!
+    # 2. If it HAS genuine Apple/Camera Lens EXIF:
+    # It was physically shot with the iPhone camera lens. Only flag if it's severely blurry!
     if has_camera_exif:
         if is_blurry:
             reasons.append("Camera photo suffers from severe motion blur or out-of-focus lens")
-            return "blurry", 0.84, reasons
+            return "blurry", 0.85, reasons
         return None, 0.0, reasons
 
-    # Only run graphic/text contour analysis on non-camera images (social forwards, banners, wishes)
+    # =========================================================================
+    # Below here: `has_camera_exif` is FALSE!
+    # On an iPhone 16 Pro Max / 18 Pro Max, any image in DCIM without camera EXIF
+    # was NOT taken by the iPhone camera — it was received/saved from WhatsApp,
+    # SMS, Web, or social forwards! Now we classify which type of clutter it is:
+    # =========================================================================
     tiny_bgr = cv2.resize(small_bgr, (240, 240), interpolation=cv2.INTER_AREA)
     tiny_gray = cv2.cvtColor(tiny_bgr, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(tiny_bgr, cv2.COLOR_BGR2HSV)
@@ -344,52 +389,56 @@ def detect_junk_category(
     text_box_count = 0
     for c in contours:
         _, _, cw, ch = cv2.boundingRect(c)
-        if 14 < cw < 200 and 5 < ch < 45 and (cw / max(1, ch)) > 1.8:
+        if 12 < cw < 210 and 5 < ch < 48 and (cw / max(1, ch)) > 1.7:
             text_box_count += 1
 
     sat = hsv[:, :, 1]
     val = hsv[:, :, 2]
-    high_sat_ratio = float(np.mean(sat > 150))
-    very_bright_ratio = float(np.mean(val > 235))
+    high_sat_ratio = float(np.mean(sat > 140))
+    very_bright_ratio = float(np.mean(val > 230))
 
-    if "banner" in fname_lower or "flyer" in fname_lower or "promo" in fname_lower:
+    # 3. Banner / Flyer / Poster Check
+    if any(k in fname_lower for k in ("banner", "flyer", "promo", "poster")):
         reasons.append("Filename matches banner/promotional graphic")
         return "banner", 0.94, reasons
 
-    if aspect_ratio >= 2.35:
-        reasons.append(f"Extreme banner/scroll aspect ratio ({aspect_ratio:.1f}:1) with no camera EXIF")
+    if aspect_ratio >= 2.05:
+        reasons.append(f"Wide/Tall Banner or Flyer aspect ratio ({aspect_ratio:.1f}:1) with no camera EXIF")
         return "banner", 0.91, reasons
 
-    if text_box_count >= 12 and very_bright_ratio > 0.25:
-        reasons.append(f"Poster/Banner layout ({text_box_count} text blocks over graphic background)")
-        return "banner", 0.86, reasons
+    if text_box_count >= 10 and very_bright_ratio > 0.22:
+        reasons.append(f"Promotional Flyer / Banner layout ({text_box_count} text blocks over flat graphic background)")
+        return "banner", 0.87, reasons
 
+    # 4. Wish Messages ("Happy New Year", "Good Morning", Festival / Birthday Greeting Cards)
     wish_keywords = ("wish", "new_year", "newyear", "greeting", "morning", "diwali", "christmas", "eid", "bday", "happy")
     if any(k in fname_lower for k in wish_keywords):
         reasons.append("Filename matches greeting/wish card pattern")
         return "wish_greeting", 0.95, reasons
 
-    if high_sat_ratio > 0.34 and text_box_count >= 4 and edge_density > 0.06 and max(width, height) <= 2048:
+    # Greeting cards saved from WhatsApp have colorful/festive saturation + overlaid text blocks
+    if high_sat_ratio > 0.26 and text_box_count >= 3 and edge_density > 0.045:
         reasons.append(
-            f"Vibrant graphic ({int(high_sat_ratio*100)}% high saturation) with overlaid greeting typography ({text_box_count} text regions) & no camera EXIF"
+            f"Festive/Wish Greeting Card ({int(high_sat_ratio*100)}% vibrant saturation + {text_box_count} overlaid greeting text regions, no camera EXIF)"
         )
         return "wish_greeting", 0.88, reasons
 
+    # 5. WhatsApp Forwards & Saved Social Media Images
     wa_pattern = re.compile(r"(img[-_]\d{8}[-_]wa\d+|whatsapp|wa\d{4}|^[0-9a-f]{8}-[0-9a-f]{4})", re.I)
     if wa_pattern.search(filename):
         reasons.append("Matches WhatsApp media naming pattern (IMG-YYYYMMDD-WAxxxx / UUID)")
         return "whatsapp_forward", 0.97, reasons
 
+    # On iOS, WhatsApp saves images as IMG_xxxx.JPG with stripped camera EXIF and compressed dimensions (<= 2048px)
     max_dim = max(width, height)
-    if ext in (".jpg", ".jpeg") and max_dim in (1600, 1280, 1080, 1024, 960, 800, 720):
-        reasons.append(f"Stripped camera EXIF + standard WhatsApp compression resolution ({width}x{height})")
-        return "whatsapp_forward", 0.87, reasons
+    if max_dim <= 2560:
+        reasons.append(
+            f"WhatsApp / Social Forward ({width}x{height} {ext.upper()}, stripped Apple Camera EXIF)"
+        )
+        return "whatsapp_forward", 0.89, reasons
 
-    if ext in (".jpg", ".jpeg") and max_dim <= 1600 and text_box_count >= 3:
-        reasons.append(f"Forwarded social image ({width}x{height}, no camera EXIF, embedded text/caption)")
-        return "whatsapp_forward", 0.82, reasons
-
-    return None, 0.0, reasons
+    reasons.append(f"External non-camera image ({width}x{height}, no iPhone camera EXIF)")
+    return "whatsapp_forward", 0.80, reasons
 
 
 def analyze_video_file(filepath: str, rel_path: str, file_id: str) -> MediaItem:
@@ -472,7 +521,6 @@ def analyze_photo_file(
             pil_img, filepath
         )
 
-        # Fast draft/thumbnail decode at max 512px so 24MP/48MP HEIC/JPEG files decode 10x faster!
         try:
             pil_img.draft("RGB", (512, 512))
         except Exception:
@@ -516,7 +564,7 @@ def analyze_photo_file(
             height=orig_height,
             capture_time=capture_ts,
             capture_time_iso=datetime.fromtimestamp(capture_ts).strftime("%Y-%m-%d %H:%M:%S"),
-            camera_model=camera_model or ("iPhone Camera" if has_camera_exif else "External / Social"),
+            camera_model=camera_model or ("iPhone Camera" if has_camera_exif else "WhatsApp / Saved Image"),
             has_camera_exif=has_camera_exif,
             gps_lat=gps_lat,
             gps_lon=gps_lon,
@@ -564,6 +612,13 @@ def compute_pair_similarity(
     max_time_window_sec: float = 120.0,
     max_gps_distance_meters: float = 50.0,
 ) -> Tuple[float, float, Optional[float], bool]:
+    """
+    Handheld-Calibrated Multi-Factor Similarity Score (0..100%):
+    - Checks GPS distance (must be <= 50m if both have GPS)
+    - Checks Timestamp proximity (within max_time_window_sec, or near-exact visual copy)
+    - Combines translation-invariant HSV Scene Histogram similarity + Perceptual Hash (pHash/dHash)
+      so two handheld takes of the same pose/scene taken seconds apart score 95% - 100%.
+    """
     time_diff = abs(a.capture_time - b.capture_time)
 
     dist_m: Optional[float] = None
@@ -575,7 +630,17 @@ def compute_pair_similarity(
     p_dist = hamming_distance(a.phash, b.phash)
     d_dist = hamming_distance(a.dhash, b.dhash)
     best_hamming = min(p_dist, d_dist)
-    hash_sim_pct = max(0.0, 100.0 - (best_hamming * 0.78))
+
+    # Calibrated curve for 64-bit perceptual hash:
+    # 0..2 bits diff = 99-100% (identical)
+    # 3..14 bits diff = 94-98% (same pose/scene with slight handheld movement)
+    # >22 bits diff = <85% (different composition)
+    if best_hamming <= 2:
+        hash_sim_pct = 100.0 - best_hamming * 0.4
+    elif best_hamming <= 16:
+        hash_sim_pct = 99.0 - (best_hamming - 2) * 0.38
+    else:
+        hash_sim_pct = max(0.0, 93.5 - (best_hamming - 16) * 1.2)
 
     scene_sim_pct = hash_sim_pct
     if a.scene_vec and b.scene_vec and len(a.scene_vec) == len(b.scene_vec):
@@ -584,15 +649,15 @@ def compute_pair_similarity(
         cos_sim = float(np.dot(va, vb))
         scene_sim_pct = max(0.0, min(100.0, cos_sim * 100.0))
 
-    face_penalty = 0.0
-    if a.faces_count != b.faces_count and not (a.is_blurry or b.is_blurry):
-        if abs(a.faces_count - b.faces_count) >= 2:
-            face_penalty = 8.0
-        else:
-            face_penalty = 2.0
+    # Blend translation-invariant scene histogram (55%) + structural hash (45%)
+    combined_sim = (scene_sim_pct * 0.55) + (hash_sim_pct * 0.45)
 
-    combined_sim = round((hash_sim_pct * 0.60 + scene_sim_pct * 0.40) - face_penalty, 1)
-    context_ok = (time_diff <= max_time_window_sec) or (combined_sim >= 98.5)
+    # Bonus if taken within 15 seconds of each other at the exact same spot (burst multi-take)
+    if time_diff <= 15.0 and best_hamming <= 16 and scene_sim_pct >= 92.0:
+        combined_sim = min(99.8, combined_sim + 1.5)
+
+    combined_sim = round(combined_sim, 1)
+    context_ok = (time_diff <= max_time_window_sec) or (best_hamming <= 6 and combined_sim >= 97.5)
 
     return combined_sim, round(time_diff, 1), dist_m, context_ok
 
@@ -640,14 +705,14 @@ def cluster_similar_media(
             if ri != rj:
                 parent[ri] = rj
 
-        # Fast 1: Group exact/near-exact visual copies anywhere in library via pHash prefix bucketing
+        # 1. Exact/Near-exact copies anywhere in library via pHash prefix bucketing
         phash_buckets: Dict[str, List[int]] = {}
         for idx, it in enumerate(sorted_media):
             if len(it.phash) >= 4:
-                phash_buckets.setdefault(it.phash[:3], []).append(idx)
+                phash_buckets.setdefault(it.phash[:2], []).append(idx)
 
         for bucket_indices in phash_buckets.values():
-            if len(bucket_indices) > 1:
+            if 1 < len(bucket_indices) <= 80:
                 for bi in range(len(bucket_indices)):
                     for bj in range(bi + 1, len(bucket_indices)):
                         i1, i2 = bucket_indices[bi], bucket_indices[bj]
@@ -657,14 +722,13 @@ def cluster_similar_media(
                         if context_ok and sim_pct >= min_similarity_pct:
                             union(i1, i2)
 
-        # Fast 2: Sliding window over sorted timestamps (only compares photos taken within max_time_window_sec!)
-        # Makes clustering 10,000 photos take < 0.05 seconds instead of 100,000,000 comparisons!
+        # 2. Sliding time window over sorted timestamps
         for i in range(n):
             a = sorted_media[i]
             for j in range(i + 1, n):
                 b = sorted_media[j]
                 if (b.capture_time - a.capture_time) > max_time_window_sec:
-                    break  # Since sorted by capture_time, no subsequent j will be within time window!
+                    break
                 sim_pct, _, _, context_ok = compute_pair_similarity(
                     a, b, max_time_window_sec=max_time_window_sec, max_gps_distance_meters=max_gps_distance_meters
                 )
@@ -822,7 +886,9 @@ def _load_scan_cache(cache_file: Path) -> Dict[str, dict]:
         return {}
     try:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
+        if isinstance(data, dict) and data.get("_version") == CACHE_VERSION:
+            return data.get("items", {})
+        return {}
     except Exception:
         return {}
 
@@ -833,7 +899,7 @@ def _save_scan_cache(cache_file: Path, items: List[MediaItem]):
         for it in items:
             key = f"{it.rel_path}|{it.file_size}|{int(it.mtime)}"
             payload[key] = it.to_dict(include_scene_vec=True)
-        cache_file.write_text(json.dumps(payload), encoding="utf-8")
+        cache_file.write_text(json.dumps({"_version": CACHE_VERSION, "items": payload}), encoding="utf-8")
     except Exception as exc:
         print(f"[WARN] Could not write scan cache: {exc}")
 
@@ -845,10 +911,6 @@ def scan_Backup_directory(
     return_raw_items: bool = False,
     progress_callback: Optional[Callable[[int, int, str, float], None]] = None,
 ):
-    """
-    Multi-core parallel scanner with persistent `.iphone_scan_cache.json`.
-    Uses all CPU cores on the user's Intel i7 machine.
-    """
     start_time = time.time()
     root_path = Path(source_dir).expanduser().resolve()
     if not root_path.exists():
@@ -904,7 +966,7 @@ def scan_Backup_directory(
     total_files = len(photo_tasks) + len(video_tasks)
     cpu_workers = min(16, max(4, (os.cpu_count() or 4)))
     print(
-        f"\n[TURBO SCAN] Found {len(photo_tasks)} photos and {len(video_tasks)} videos in {root_path} (Using {cpu_workers} parallel i7 threads + Disk Cache)",
+        f"\n[TURBO SCAN] Found {len(photo_tasks)} photos and {len(video_tasks)} videos in {root_path} (Using {cpu_workers} parallel i7 threads)",
         flush=True,
     )
 
@@ -912,7 +974,6 @@ def scan_Backup_directory(
     uncached_photos: List[Tuple[int, Path, Optional[Path], str]] = []
     idx_counter = 1
 
-    # Step 1: Check persistent disk cache first (0.0001s per cached photo!)
     for photo_path, live_mov in sorted(photo_tasks, key=lambda x: str(x[0])):
         rel_p = str(photo_path.relative_to(root_path))
         file_id = f"media_{idx_counter:05d}"
@@ -936,7 +997,6 @@ def scan_Backup_directory(
     if cached_count > 0:
         print(f"  -> Loaded {cached_count} already-analyzed photos from instant cache!", flush=True)
 
-    # Step 2: Analyze uncached photos in parallel across all CPU threads
     completed_count = cached_count
     if uncached_photos:
         def _worker_photo(args):
@@ -945,7 +1005,7 @@ def scan_Backup_directory(
                 filepath=str(p_path),
                 rel_path=r_path,
                 file_id=f"media_{fid_num:05d}",
-                live_video_path=str(l_mov) if l_mov else None,
+                live_video_path=str(l_mov) if live_mov else None,
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=cpu_workers) as pool:
@@ -961,7 +1021,6 @@ def scan_Backup_directory(
                     if progress_callback:
                         progress_callback(completed_count, total_files, fname, rate)
 
-    # Step 3: Analyze videos in parallel
     if video_tasks:
         def _worker_video(args):
             fid_num, v_path, r_path = args
@@ -983,7 +1042,6 @@ def scan_Backup_directory(
                 if progress_callback:
                     progress_callback(completed_count, total_files, v_item.filename, rate)
 
-    # Save updated cache so next startup or rescan is instant!
     _save_scan_cache(cache_file, media_items)
 
     elapsed_total = round(time.time() - start_time, 2)
